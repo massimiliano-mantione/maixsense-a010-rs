@@ -319,6 +319,7 @@ async fn main() {
 const FRAME_WITH: f32 = 1000.0;
 const FRAME_HEIGHT: f32 = 1000.0;
 const FRAME_DISTANCE_UNIT: f32 = 10.0;
+const BASE_CAMERA_DISTANCE: f32 = 4000.0;
 
 fn build_frame_transforms(frame: &A010Frame) -> Vec<Mat4> {
     let side = match frame.frame_size {
@@ -351,7 +352,7 @@ fn main_window(frame_receiver: FrameReceiver) {
     let mut frame_receiver = frame_receiver;
     let window = Window::new(WindowSettings {
         title: "Instanced Shapes!".to_string(),
-        max_size: Some((1280, 720)),
+        max_size: Some((2000, 2000)),
         ..Default::default()
     })
     .unwrap();
@@ -359,12 +360,12 @@ fn main_window(frame_receiver: FrameReceiver) {
 
     let mut camera = Camera::new_perspective(
         window.viewport(),
-        vec3(60.00, 50.0, 60.0), // camera position
-        vec3(0.0, 0.0, 0.0),     // camera target
-        vec3(0.0, 1.0, 0.0),     // camera up
-        degrees(45.0),
+        vec3(0.00, 0.0, BASE_CAMERA_DISTANCE), // camera position
+        vec3(0.0, 0.0, 0.0),                   // camera target
+        vec3(0.0, 1.0, 0.0),                   // camera up
+        degrees(90.0),
         0.1,
-        1000.0,
+        10000.0,
     );
     let mut control = OrbitControl::new(vec3(0.0, 0.0, 0.0), 1.0, 1000.0);
 
@@ -375,7 +376,7 @@ fn main_window(frame_receiver: FrameReceiver) {
 
     // Instanced mesh object, initialise with empty instances.
     let mut instanced_mesh = Gm::new(
-        InstancedMesh::new(&context, &Instances::default(), &CpuMesh::sphere(32)),
+        InstancedMesh::new(&context, &Instances::default(), &CpuMesh::sphere(3)),
         PhysicalMaterial::new(
             &context,
             &CpuMaterial {
