@@ -1,5 +1,6 @@
 use clap::Parser;
 use futures::sink::SinkExt;
+use three_d::*;
 use tokio::{select, spawn};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use tokio_stream::StreamExt;
@@ -243,6 +244,39 @@ async fn handle_frames(frame_receiver: FrameReceiver) {
     }
 }
 
+async fn handle_at_commands(a010: A010CodecFramed) {
+    let mut a010 = a010;
+
+    let stdin = tokio::io::stdin();
+    let mut reader = FramedRead::new(stdin, LinesCodec::new());
+
+    loop {
+        select! {
+            command = reader.next() => {
+                let command = command.transpose().unwrap();
+                if let Some(cmd) = command {
+                    if let Err(err) = a010.send(cmd).await {
+                        eprintln!("Error sending command: {}", err);
+                        return;
+                    }
+                } else {
+                    println!("stdin stream terminated");
+                    return;
+                }
+            }
+            response = a010.next() => {
+                let response = response.transpose().unwrap();
+                if let Some(rsp) = response {
+                    println!("RSP: {}", rsp);
+                } else {
+                    println!("response stream terminated");
+                    return;
+                }
+            }
+        };
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -276,35 +310,155 @@ async fn main() {
         .unwrap();
 
     let (codec, frame_receiver) = A010Codec::new();
-    let mut a010: A010CodecFramed = Framed::new(serial, codec);
-    spawn(handle_frames(frame_receiver));
+    let a010: A010CodecFramed = Framed::new(serial, codec);
+    spawn(handle_at_commands(a010));
 
-    let stdin = tokio::io::stdin();
-    let mut reader = FramedRead::new(stdin, LinesCodec::new());
+    main_window(frame_receiver);
+}
 
-    loop {
-        select! {
-            command = reader.next() => {
-                let command = command.transpose().unwrap();
-                if let Some(cmd) = command {
-                    if let Err(err) = a010.send(cmd).await {
-                        eprintln!("Error sending command: {}", err);
-                        return;
-                    }
-                } else {
-                    println!("stdin stream terminated");
-                    return;
-                }
-            }
-            response = a010.next() => {
-                let response = response.transpose().unwrap();
-                if let Some(rsp) = response {
-                    println!("RSP: {}", rsp);
-                } else {
-                    println!("response stream terminated");
-                    return;
-                }
-            }
-        };
+const FRAME_WITH: f32 = 1000.0;
+const FRAME_HEIGHT: f32 = 1000.0;
+const FRAME_DISTANCE_UNIT: f32 = 10.0;
+
+fn build_frame_transforms(frame: &A010Frame) -> Vec<Mat4> {
+    let side = match frame.frame_size {
+        10000 => 100,
+        2500 => 50,
+        625 => 25,
+        _ => return Vec::new(),
+    };
+
+    let dw = FRAME_WITH / side as f32;
+    let dh = FRAME_HEIGHT / side as f32;
+
+    let x0 = -FRAME_WITH / 2.0;
+    let y0 = -FRAME_HEIGHT / 2.0;
+
+    let mut transformations = Vec::new();
+    for ix in 0..side {
+        for iy in 0..side {
+            let x = x0 + (ix as f32 * dw);
+            let y = y0 + (iy as f32 * dh);
+            let i = ix + iy * side;
+            let z = frame.data[i] as f32 * FRAME_DISTANCE_UNIT;
+            transformations.push(Mat4::from_translation(vec3(x, y, z)));
+        }
     }
+    transformations
+}
+
+fn main_window(frame_receiver: FrameReceiver) {
+    let mut frame_receiver = frame_receiver;
+    let window = Window::new(WindowSettings {
+        title: "Instanced Shapes!".to_string(),
+        max_size: Some((1280, 720)),
+        ..Default::default()
+    })
+    .unwrap();
+    let context = window.gl();
+
+    let mut camera = Camera::new_perspective(
+        window.viewport(),
+        vec3(60.00, 50.0, 60.0), // camera position
+        vec3(0.0, 0.0, 0.0),     // camera target
+        vec3(0.0, 1.0, 0.0),     // camera up
+        degrees(45.0),
+        0.1,
+        1000.0,
+    );
+    let mut control = OrbitControl::new(vec3(0.0, 0.0, 0.0), 1.0, 1000.0);
+
+    let light0 = DirectionalLight::new(&context, 1.0, Srgba::WHITE, vec3(0.0, -0.5, -0.5));
+    let light1 = DirectionalLight::new(&context, 1.0, Srgba::WHITE, vec3(0.0, 0.5, 0.5));
+
+    let mut frame: A010Frame = A010Frame::default();
+
+    // Instanced mesh object, initialise with empty instances.
+    let mut instanced_mesh = Gm::new(
+        InstancedMesh::new(&context, &Instances::default(), &CpuMesh::sphere(32)),
+        PhysicalMaterial::new(
+            &context,
+            &CpuMaterial {
+                albedo: Srgba {
+                    r: 192,
+                    g: 192,
+                    b: 192,
+                    a: 255,
+                },
+                ..Default::default()
+            },
+        ),
+    );
+
+    // Initial properties of the example, 2 cubes per side and non instanced.
+    let mut side_count = 2;
+
+    let mut gui = three_d::GUI::new(&context);
+    window.render_loop(move |mut frame_input| {
+        // Gui panel to control the number of cubes and whether or not instancing is turned on.
+        let mut panel_width = 0.0;
+        gui.update(
+            &mut frame_input.events,
+            frame_input.accumulated_time,
+            frame_input.viewport,
+            frame_input.device_pixel_ratio,
+            |gui_context| {
+                use three_d::egui::*;
+                SidePanel::left("side_panel").show(gui_context, |ui| {
+                    use three_d::egui::*;
+                    ui.heading("Debug Panel");
+                    ui.add(
+                        Slider::new(&mut side_count, 1..=25).text("Number of cubes at each side."),
+                    );
+                    ui.add(Label::new(
+                        "Increase the cube count until the cubes don't rotate \
+                                       smoothly anymore, then toggle on instancing. The rotations \
+                                       should become smooth again.",
+                    ));
+                });
+                panel_width = gui_context.used_rect().width();
+            },
+        );
+        let viewport = Viewport {
+            x: (panel_width * frame_input.device_pixel_ratio) as i32,
+            y: 0,
+            width: frame_input.viewport.width
+                - (panel_width * frame_input.device_pixel_ratio) as u32,
+            height: frame_input.viewport.height,
+        };
+        camera.set_viewport(viewport);
+
+        // Camera control must be after the gui update.
+        control.handle_events(&mut camera, &mut frame_input.events);
+
+        // Get frame data
+        match frame_receiver.has_changed() {
+            Ok(changed) => {
+                if changed {
+                    println!("Frame changed, updating mesh instances.");
+
+                    let new_frame = frame_receiver.borrow_and_update();
+                    frame = *new_frame;
+                }
+            }
+            Err(e) => {
+                eprintln!("frame receiver error: {}", e);
+            }
+        }
+
+        // Build frame
+        instanced_mesh.set_instances(&Instances {
+            transformations: build_frame_transforms(&frame),
+            ..Default::default()
+        });
+
+        // Render everything
+        let screen = frame_input.screen();
+        screen.clear(ClearState::color_and_depth(0.8, 0.8, 0.8, 1.0, 1.0));
+        screen.render(&camera, &instanced_mesh, &[&light0, &light1]);
+
+        screen.write(|| gui.render()).unwrap();
+
+        FrameOutput::default()
+    });
 }

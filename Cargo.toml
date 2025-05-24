@@ -8,6 +8,7 @@ async-fn-stream = "0.2.2"
 atat = {version = "0.24.0", features = ["log", "std"]}
 clap = {version = "4.5.38", features = ["derive"]}
 futures = "0.3.31"
+three-d = {version = "0.18.2", features = ["egui", "egui-gui", "headless", "text"]}
 tokio = {version = "1.45.0", features = ["macros","tokio-macros", "test-util", "signal", "time", "fs", "sync", "io-std", "io-util", "process", "rt", "rt-multi-thread"] }
 tokio-serial = {version = "5.4.5", features = ["bytes", "rt", "tokio-util"]}
 tokio-stream = {version = "0.1.17", features = ["fs", "io-util", "signal", "sync", "tokio-util"]}
