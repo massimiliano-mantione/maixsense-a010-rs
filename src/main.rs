@@ -319,7 +319,8 @@ async fn main() {
 const FRAME_WITH: f32 = 1000.0;
 const FRAME_HEIGHT: f32 = 1000.0;
 const FRAME_DISTANCE_UNIT: f32 = 10.0;
-const BASE_CAMERA_DISTANCE: f32 = 4000.0;
+const BASE_CAMERA_DISTANCE: f32 = 1000.0;
+const CAMERA_APERTURE: f32 = 60.0;
 
 fn build_frame_transforms(frame: &A010Frame) -> Vec<Mat4> {
     let side = match frame.frame_size {
@@ -341,7 +342,7 @@ fn build_frame_transforms(frame: &A010Frame) -> Vec<Mat4> {
             let x = x0 + (ix as f32 * dw);
             let y = y0 + (iy as f32 * dh);
             let i = ix + iy * side;
-            let z = frame.data[i] as f32 * FRAME_DISTANCE_UNIT;
+            let z = frame.data[i] as f32 * -FRAME_DISTANCE_UNIT;
             transformations.push(Mat4::from_translation(vec3(x, y, z)));
         }
     }
@@ -363,7 +364,7 @@ fn main_window(frame_receiver: FrameReceiver) {
         vec3(0.00, 0.0, BASE_CAMERA_DISTANCE), // camera position
         vec3(0.0, 0.0, 0.0),                   // camera target
         vec3(0.0, 1.0, 0.0),                   // camera up
-        degrees(90.0),
+        degrees(CAMERA_APERTURE),
         0.1,
         10000.0,
     );
@@ -436,8 +437,6 @@ fn main_window(frame_receiver: FrameReceiver) {
         match frame_receiver.has_changed() {
             Ok(changed) => {
                 if changed {
-                    println!("Frame changed, updating mesh instances.");
-
                     let new_frame = frame_receiver.borrow_and_update();
                     frame = *new_frame;
                 }
