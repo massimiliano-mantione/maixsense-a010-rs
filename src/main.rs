@@ -319,8 +319,6 @@ async fn main() {
 const FRAME_WITH: f32 = 1000.0;
 const FRAME_HEIGHT: f32 = 1000.0;
 const FRAME_DISTANCE_UNIT: f32 = 10.0;
-const BASE_CAMERA_DISTANCE: f32 = 1000.0;
-const CAMERA_APERTURE: f32 = 60.0;
 
 fn build_frame_transforms(frame: &A010Frame) -> Vec<Mat4> {
     let side = match frame.frame_size {
@@ -349,6 +347,84 @@ fn build_frame_transforms(frame: &A010Frame) -> Vec<Mat4> {
     transformations
 }
 
+fn setup_frame_indices(indices: &mut Vec<u16>, side: usize) {
+    indices.clear();
+    for ix in 0..side - 1 {
+        for iy in 0..side - 1 {
+            let i = ix + iy * side;
+            let i0 = i as u16;
+            let i1 = (i + 1) as u16;
+            let i2 = (i + side) as u16;
+            let i3 = (i + side + 1) as u16;
+
+            if i % 2 == 0 {
+                indices.push(i0);
+                indices.push(i1);
+                indices.push(i2);
+                indices.push(i1);
+                indices.push(i3);
+                indices.push(i2);
+            } else {
+                indices.push(i0);
+                indices.push(i1);
+                indices.push(i3);
+                indices.push(i0);
+                indices.push(i3);
+                indices.push(i2);
+            }
+        }
+    }
+}
+
+const FRAME_APERTURE_W: f32 = 60.0;
+const FRAME_APERTURE_H: f32 = 60.0;
+const FRAME_DISTANCE_SCALE: f32 = 1.0;
+
+fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
+    let positions = match &mut mesh.positions {
+        Positions::F32(points) => points,
+        _ => return false,
+    };
+    let indices = match &mut mesh.indices {
+        Indices::U16(items) => items,
+        _ => return false,
+    };
+    let side = match frame.frame_size {
+        10000 => 100,
+        2500 => 50,
+        625 => 25,
+        _ => return false,
+    };
+
+    if positions.len() != side * side {
+        setup_frame_indices(indices, side);
+    }
+
+    let dw = FRAME_APERTURE_W / side as f32;
+    let dh = FRAME_APERTURE_H / side as f32;
+
+    let ax0 = -FRAME_APERTURE_W / 2.0;
+    let ay0 = -FRAME_APERTURE_H / 2.0;
+
+    positions.clear();
+    for ix in 0..side {
+        for iy in 0..side {
+            let i = ix + iy * side;
+            let z = frame.data[i] as f32 * -FRAME_DISTANCE_UNIT;
+            let ax = ax0 + (ix as f32 * dw);
+            let ay = ay0 + (iy as f32 * dh);
+            let x = ax.to_radians().sin() * z * FRAME_DISTANCE_SCALE;
+            let y = ay.to_radians().sin() * z * FRAME_DISTANCE_SCALE;
+            positions.push(vec3(x, y, z));
+        }
+    }
+
+    true
+}
+
+const CAMERA_APERTURE: f32 = 60.0;
+const INITIAL_CAMERA_DISTANCE: f32 = 1000.0;
+
 fn main_window(frame_receiver: FrameReceiver) {
     let mut frame_receiver = frame_receiver;
     let window = Window::new(WindowSettings {
@@ -361,9 +437,9 @@ fn main_window(frame_receiver: FrameReceiver) {
 
     let mut camera = Camera::new_perspective(
         window.viewport(),
-        vec3(0.00, 0.0, BASE_CAMERA_DISTANCE), // camera position
-        vec3(0.0, 0.0, 0.0),                   // camera target
-        vec3(0.0, 1.0, 0.0),                   // camera up
+        vec3(0.00, 0.0, INITIAL_CAMERA_DISTANCE), // camera position
+        vec3(0.0, 0.0, 0.0),                      // camera target
+        vec3(0.0, 1.0, 0.0),                      // camera up
         degrees(CAMERA_APERTURE),
         0.1,
         10000.0,
@@ -375,22 +451,23 @@ fn main_window(frame_receiver: FrameReceiver) {
 
     let mut frame: A010Frame = A010Frame::default();
 
-    // Instanced mesh object, initialise with empty instances.
-    let mut instanced_mesh = Gm::new(
-        InstancedMesh::new(&context, &Instances::default(), &CpuMesh::sphere(3)),
-        PhysicalMaterial::new(
-            &context,
-            &CpuMaterial {
-                albedo: Srgba {
-                    r: 192,
-                    g: 192,
-                    b: 192,
-                    a: 255,
-                },
-                ..Default::default()
-            },
-        ),
-    );
+    // Frame mesh object
+    let positions = Vec::with_capacity(MAX_FRAME_SIZE);
+    let indices = Vec::with_capacity(MAX_FRAME_SIZE * 3);
+    let mut frame_mesh = CpuMesh {
+        positions: Positions::F32(positions),
+        indices: Indices::U16(indices),
+        colors: Some(vec![
+            Srgba {
+                r: 192,
+                g: 192,
+                b: 192,
+                a: 255,
+            };
+            MAX_FRAME_SIZE
+        ]),
+        ..Default::default()
+    };
 
     // Initial properties of the example, 2 cubes per side and non instanced.
     let mut side_count = 2;
@@ -447,15 +524,15 @@ fn main_window(frame_receiver: FrameReceiver) {
         }
 
         // Build frame
-        instanced_mesh.set_instances(&Instances {
-            transformations: build_frame_transforms(&frame),
-            ..Default::default()
-        });
+        let render_frame = setup_frame(&frame, &mut frame_mesh);
 
         // Render everything
         let screen = frame_input.screen();
         screen.clear(ClearState::color_and_depth(0.8, 0.8, 0.8, 1.0, 1.0));
-        screen.render(&camera, &instanced_mesh, &[&light0, &light1]);
+        if render_frame {
+            let object = Gm::new(Mesh::new(&context, &frame_mesh), ColorMaterial::default());
+            screen.render(&camera, &object, &[&light0, &light1]);
+        }
 
         screen.write(|| gui.render()).unwrap();
 
