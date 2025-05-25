@@ -228,22 +228,6 @@ impl Encoder<String> for A010Codec {
     }
 }
 
-async fn handle_frames(frame_receiver: FrameReceiver) {
-    let mut frame_receiver = frame_receiver;
-    loop {
-        match frame_receiver.changed().await {
-            Ok(_) => {
-                // Handle frame
-                let frame = frame_receiver.borrow();
-                println!("Received frame: size {}", frame.frame_size);
-            }
-            Err(e) => {
-                eprintln!("frame receiver error: {}", e);
-            }
-        }
-    }
-}
-
 async fn handle_at_commands(a010: A010CodecFramed) {
     let mut a010 = a010;
 
@@ -316,37 +300,6 @@ async fn main() {
     main_window(frame_receiver);
 }
 
-const FRAME_WITH: f32 = 1000.0;
-const FRAME_HEIGHT: f32 = 1000.0;
-const FRAME_DISTANCE_UNIT: f32 = 10.0;
-
-fn build_frame_transforms(frame: &A010Frame) -> Vec<Mat4> {
-    let side = match frame.frame_size {
-        10000 => 100,
-        2500 => 50,
-        625 => 25,
-        _ => return Vec::new(),
-    };
-
-    let dw = FRAME_WITH / side as f32;
-    let dh = FRAME_HEIGHT / side as f32;
-
-    let x0 = -FRAME_WITH / 2.0;
-    let y0 = -FRAME_HEIGHT / 2.0;
-
-    let mut transformations = Vec::new();
-    for ix in 0..side {
-        for iy in 0..side {
-            let x = x0 + (ix as f32 * dw);
-            let y = y0 + (iy as f32 * dh);
-            let i = ix + iy * side;
-            let z = frame.data[i] as f32 * -FRAME_DISTANCE_UNIT;
-            transformations.push(Mat4::from_translation(vec3(x, y, z)));
-        }
-    }
-    transformations
-}
-
 fn setup_frame_indices(indices: &mut Vec<u16>, side: usize) {
     indices.clear();
     for ix in 0..side - 1 {
@@ -406,6 +359,8 @@ const FRAME_APERTURE_W: f32 = 60.0;
 const FRAME_APERTURE_H: f32 = 60.0;
 const FRAME_DISTANCE_SCALE: f32 = 1.0;
 
+const MAX_Z: f32 = 255.0;
+
 fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
     let positions = match &mut mesh.positions {
         Positions::F32(points) => points,
@@ -441,11 +396,12 @@ fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
     for ix in 0..side {
         for iy in 0..side {
             let i = ix + iy * side;
-            let z = frame.data[i] as f32 * -FRAME_DISTANCE_UNIT;
+            let distance = frame.data[i] as f32 * FRAME_DISTANCE_SCALE;
+            let z = MAX_Z - distance;
             let ax = ax0 + (ix as f32 * dw);
             let ay = ay0 + (iy as f32 * dh);
-            let x = ax.to_radians().sin() * z * FRAME_DISTANCE_SCALE;
-            let y = ay.to_radians().sin() * z * FRAME_DISTANCE_SCALE;
+            let x = ax.to_radians().sin() * distance * FRAME_DISTANCE_SCALE;
+            let y = ay.to_radians().sin() * distance * FRAME_DISTANCE_SCALE;
             positions.push(vec3(x, y, z));
         }
     }
@@ -454,7 +410,7 @@ fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
 }
 
 const CAMERA_APERTURE: f32 = 60.0;
-const INITIAL_CAMERA_DISTANCE: f32 = 1000.0;
+const INITIAL_CAMERA_DISTANCE: f32 = MAX_Z * 2.0;
 
 fn main_window(frame_receiver: FrameReceiver) {
     let mut frame_receiver = frame_receiver;
@@ -475,7 +431,7 @@ fn main_window(frame_receiver: FrameReceiver) {
         0.1,
         10000.0,
     );
-    let mut control = OrbitControl::new(vec3(0.0, 0.0, 0.0), 1.0, 1000.0);
+    let mut control = OrbitControl::new(vec3(0.0, 0.0, 0.0), MAX_Z, MAX_Z * 4.0);
 
     let light0 = DirectionalLight::new(&context, 1.0, Srgba::WHITE, vec3(1.0, -1.0, 1.0));
     let light1 = DirectionalLight::new(&context, 1.0, Srgba::WHITE, vec3(-1.0, -1.0, 1.0));
