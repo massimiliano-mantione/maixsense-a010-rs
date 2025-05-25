@@ -376,6 +376,32 @@ fn setup_frame_indices(indices: &mut Vec<u16>, side: usize) {
     }
 }
 
+const FRAME_COLOR_EVEN: Srgba = Srgba {
+    r: 192,
+    g: 192,
+    b: 192,
+    a: 255,
+};
+const FRAME_COLOR_ODD: Srgba = Srgba {
+    r: 64,
+    g: 64,
+    b: 64,
+    a: 255,
+};
+
+fn setup_frame_colors(colors: &mut Vec<Srgba>, side: usize) {
+    colors.clear();
+    for ix in 0..side {
+        for iy in 0..side {
+            if (ix + iy) % 2 == 0 {
+                colors.push(FRAME_COLOR_EVEN);
+            } else {
+                colors.push(FRAME_COLOR_ODD);
+            }
+        }
+    }
+}
+
 const FRAME_APERTURE_W: f32 = 60.0;
 const FRAME_APERTURE_H: f32 = 60.0;
 const FRAME_DISTANCE_SCALE: f32 = 1.0;
@@ -389,6 +415,10 @@ fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
         Indices::U16(items) => items,
         _ => return false,
     };
+    let colors = match &mut mesh.colors {
+        Some(colors) => colors,
+        None => return false,
+    };
     let side = match frame.frame_size {
         10000 => 100,
         2500 => 50,
@@ -398,6 +428,7 @@ fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
 
     if positions.len() != side * side {
         setup_frame_indices(indices, side);
+        setup_frame_colors(colors, side);
     }
 
     let dw = FRAME_APERTURE_W / side as f32;
@@ -446,8 +477,8 @@ fn main_window(frame_receiver: FrameReceiver) {
     );
     let mut control = OrbitControl::new(vec3(0.0, 0.0, 0.0), 1.0, 1000.0);
 
-    let light0 = DirectionalLight::new(&context, 1.0, Srgba::WHITE, vec3(0.0, -0.5, -0.5));
-    let light1 = DirectionalLight::new(&context, 1.0, Srgba::WHITE, vec3(0.0, 0.5, 0.5));
+    let light0 = DirectionalLight::new(&context, 1.0, Srgba::WHITE, vec3(1.0, -1.0, 1.0));
+    let light1 = DirectionalLight::new(&context, 1.0, Srgba::WHITE, vec3(-1.0, -1.0, 1.0));
 
     let mut frame: A010Frame = A010Frame::default();
 
@@ -457,15 +488,7 @@ fn main_window(frame_receiver: FrameReceiver) {
     let mut frame_mesh = CpuMesh {
         positions: Positions::F32(positions),
         indices: Indices::U16(indices),
-        colors: Some(vec![
-            Srgba {
-                r: 192,
-                g: 192,
-                b: 192,
-                a: 255,
-            };
-            MAX_FRAME_SIZE
-        ]),
+        colors: Some(Vec::with_capacity(MAX_FRAME_SIZE)),
         ..Default::default()
     };
 
