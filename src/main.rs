@@ -6,7 +6,7 @@ use tokio_serial::{SerialPortBuilderExt, SerialStream};
 use tokio_stream::StreamExt;
 use tokio_util::{
     bytes::{Buf, BufMut},
-    codec::{Decoder, Encoder, Framed, FramedRead, LinesCodec},
+    codec::{Decoder, Encoder, Framed},
 };
 
 #[derive(Parser)]
@@ -194,8 +194,374 @@ impl A010Codec {
     }
 }
 
+fn write_at_get_arg(name: &str, dst: &mut tokio_util::bytes::BytesMut) {
+    dst.extend_from_slice(b"AT+");
+    dst.extend_from_slice(name.as_bytes());
+    dst.extend_from_slice(b"?\r");
+}
+
+fn write_at_set_arg(name: &str, value: u8, dst: &mut tokio_util::bytes::BytesMut) {
+    let mut value = value;
+    dst.extend_from_slice(b"AT+");
+    dst.extend_from_slice(name.as_bytes());
+    dst.put_u8('=' as u8);
+    if value >= 100 {
+        dst.put_u8((value / 100) as u8 + b'0');
+        value %= 100;
+    }
+    if value >= 10 {
+        dst.put_u8((value / 10) as u8 + b'0');
+        value %= 10;
+    }
+    dst.put_u8(value + b'0');
+    dst.put_u8('\r' as u8);
+}
+
+fn decode_at_arg(name: &str, from: &[u8]) -> Option<u8> {
+    from.strip_prefix(b"+")
+        .and_then(|buf| buf.strip_prefix(name.as_bytes()))
+        .and_then(|buf| buf.strip_prefix(b"="))
+        .and_then(|buf| {
+            if buf.len() < 1 || buf[0] < b'0' || buf[0] > b'9' {
+                return None;
+            }
+            let mut value = 0;
+            for &byte in buf.iter() {
+                if byte < b'0' || byte > b'9' {
+                    return None;
+                }
+                value = value * 10 + (byte - b'0') as u8;
+            }
+            Some(value)
+        })
+}
+
+fn numeric_value_name_0_20(value: u8) -> &'static str {
+    match value {
+        0 => "0",
+        1 => "1",
+        2 => "2",
+        3 => "3",
+        4 => "4",
+        5 => "5",
+        6 => "6",
+        7 => "7",
+        8 => "8",
+        9 => "9",
+        10 => "10",
+        11 => "11",
+        12 => "12",
+        13 => "13",
+        14 => "14",
+        15 => "15",
+        16 => "16",
+        17 => "17",
+        18 => "18",
+        19 => "19",
+        20 => "20",
+        _ => panic!("value not in [0 ..= 20] range"),
+    }
+}
+
+pub trait AtArg: Sized {
+    const NAME: &'static str;
+    const MIN: u8;
+    const MAX: u8;
+    const DEFAULT: u8 = Self::MIN;
+    const EXCLUDE_VALUES: &'static [u8] = &[];
+
+    fn value(&self) -> u8;
+    fn new_unchecked(value: u8) -> Self;
+
+    fn value_name(&self) -> &'static str {
+        numeric_value_name_0_20(self.value())
+    }
+
+    fn new(value: u8) -> Option<Self> {
+        Self::check_value(value).map(Self::new_unchecked)
+    }
+
+    fn default() -> Self {
+        Self::new_unchecked(Self::DEFAULT)
+    }
+
+    fn encode_get(&self, dst: &mut tokio_util::bytes::BytesMut) {
+        write_at_get_arg(Self::NAME, dst);
+    }
+
+    fn encode_set(&self, dst: &mut tokio_util::bytes::BytesMut) {
+        write_at_set_arg(Self::NAME, self.value(), dst);
+    }
+
+    fn decode(from: &[u8]) -> Option<Self> {
+        decode_at_arg(Self::NAME, from).and_then(Self::new)
+    }
+
+    fn check_value(value: u8) -> Option<u8> {
+        if value < Self::MIN || value > Self::MAX || Self::EXCLUDE_VALUES.contains(&value) {
+            None
+        } else {
+            Some(value)
+        }
+    }
+
+    fn allowed_values() -> Vec<Self> {
+        (Self::MIN..=Self::MAX).filter_map(Self::new).collect()
+    }
+}
+
+#[test]
+fn test_at_arg() {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TestArg(u8);
+    impl AtArg for TestArg {
+        const NAME: &'static str = "TEST";
+        const MIN: u8 = 0;
+        const MAX: u8 = 10;
+        const EXCLUDE_VALUES: &'static [u8] = &[3, 5, 7];
+
+        fn value(&self) -> u8 {
+            self.0
+        }
+
+        fn new_unchecked(value: u8) -> Self {
+            Self(value)
+        }
+    }
+
+    let mut buf = tokio_util::bytes::BytesMut::with_capacity(32);
+
+    let arg = TestArg::new(4).unwrap();
+    arg.encode_set(&mut buf);
+    assert_eq!(buf.as_ref(), b"AT+TEST=4\r");
+    buf.clear();
+    arg.encode_get(&mut buf);
+    assert_eq!(buf.as_ref(), b"AT+TEST?\r");
+
+    let decoded = TestArg::decode(b"+TEST=4").unwrap();
+    assert_eq!(decoded.value(), 4);
+    assert_eq!(decoded.value_name(), "4");
+    assert!(TestArg::new(3).is_none());
+    assert!(TestArg::new(5).is_none());
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BINN(u8);
+impl AtArg for BINN {
+    const NAME: &'static str = "BINN";
+    const MIN: u8 = 1;
+    const MAX: u8 = 4;
+    const EXCLUDE_VALUES: &'static [u8] = &[3];
+
+    fn value(&self) -> u8 {
+        self.0
+    }
+
+    fn new_unchecked(value: u8) -> Self {
+        Self(value)
+    }
+
+    fn value_name(&self) -> &'static str {
+        match self.value() {
+            1 => "1x1",
+            2 => "2x2",
+            4 => "4x4",
+            _ => panic!("value not in [1, 2, 4]"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DISP(u8);
+impl AtArg for DISP {
+    const NAME: &'static str = "DISP";
+    const MIN: u8 = 0;
+    const MAX: u8 = 7;
+
+    fn value(&self) -> u8 {
+        self.0
+    }
+
+    fn new_unchecked(value: u8) -> Self {
+        Self(value)
+    }
+
+    fn value_name(&self) -> &'static str {
+        match self.value() {
+            0 => "OFF",
+            1 => "LCD",
+            2 => "USB",
+            3 => "LCD,USB",
+            4 => "UART",
+            5 => "LCD,UART",
+            6 => "USB,UART",
+            7 => "LCD,USB,UART",
+            _ => panic!("value not in [0..=7] range"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BAUD(u8);
+impl AtArg for BAUD {
+    const NAME: &'static str = "BAUD";
+    const MIN: u8 = 0;
+    const MAX: u8 = 8;
+    const DEFAULT: u8 = 2;
+
+    fn value(&self) -> u8 {
+        self.0
+    }
+
+    fn new_unchecked(value: u8) -> Self {
+        Self(value)
+    }
+
+    fn value_name(&self) -> &'static str {
+        match self.value() {
+            0 => "9600",
+            1 => "57600",
+            2 => "115200",
+            3 => "230400",
+            4 => "460800",
+            5 => "921600",
+            6 => "1000000",
+            7 => "2000000",
+            8 => "3000000",
+            _ => panic!("value not in [0..=8] range"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UNIT(u8);
+impl AtArg for UNIT {
+    const NAME: &'static str = "UNIT";
+    const MIN: u8 = 0;
+    const MAX: u8 = 9;
+
+    fn value(&self) -> u8 {
+        self.0
+    }
+
+    fn new_unchecked(value: u8) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FPS(u8);
+impl AtArg for FPS {
+    const NAME: &'static str = "FPS";
+    const MIN: u8 = 1;
+    const MAX: u8 = 19;
+
+    fn value(&self) -> u8 {
+        self.0
+    }
+
+    fn new_unchecked(value: u8) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A010Arg {
+    Binn(BINN),
+    Disp(DISP),
+    Baud(BAUD),
+    Unit(UNIT),
+    Fps(FPS),
+}
+
+impl A010Arg {
+    fn encode_get(&self, dst: &mut tokio_util::bytes::BytesMut) {
+        match self {
+            A010Arg::Binn(binn) => binn.encode_get(dst),
+            A010Arg::Disp(disp) => disp.encode_get(dst),
+            A010Arg::Baud(baud) => baud.encode_get(dst),
+            A010Arg::Unit(unit) => unit.encode_get(dst),
+            A010Arg::Fps(fps) => fps.encode_get(dst),
+        }
+    }
+
+    fn encode_set(&self, dst: &mut tokio_util::bytes::BytesMut) {
+        match self {
+            A010Arg::Binn(binn) => binn.encode_set(dst),
+            A010Arg::Disp(disp) => disp.encode_set(dst),
+            A010Arg::Baud(baud) => baud.encode_set(dst),
+            A010Arg::Unit(unit) => unit.encode_set(dst),
+            A010Arg::Fps(fps) => fps.encode_set(dst),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A010Rsp {
+    OK,
+    Binn(BINN),
+    Disp(DISP),
+    Baud(BAUD),
+    Unit(UNIT),
+    Fps(FPS),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A010Cmd {
+    AT,
+    Get(A010Arg),
+    Set(A010Arg),
+    SetGet(A010Arg),
+}
+
+impl A010Rsp {
+    pub fn as_arg(&self) -> Option<A010Arg> {
+        match self {
+            A010Rsp::OK => None,
+            A010Rsp::Binn(binn) => Some(A010Arg::Binn(*binn)),
+            A010Rsp::Disp(disp) => Some(A010Arg::Disp(*disp)),
+            A010Rsp::Baud(baud) => Some(A010Arg::Baud(*baud)),
+            A010Rsp::Unit(unit) => Some(A010Arg::Unit(*unit)),
+            A010Rsp::Fps(fps) => Some(A010Arg::Fps(*fps)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct A010Config {
+    pub binn: BINN,
+    pub disp: DISP,
+    pub baud: BAUD,
+    pub unit: UNIT,
+    pub fps: FPS,
+}
+
+impl Default for A010Config {
+    fn default() -> Self {
+        Self {
+            binn: BINN::default(),
+            disp: DISP::default(),
+            baud: BAUD::default(),
+            unit: UNIT::default(),
+            fps: FPS::default(),
+        }
+    }
+}
+
+impl A010Config {
+    pub fn apply(&mut self, arg: A010Arg) {
+        match arg {
+            A010Arg::Binn(binn) => self.binn = binn,
+            A010Arg::Disp(disp) => self.disp = disp,
+            A010Arg::Baud(baud) => self.baud = baud,
+            A010Arg::Unit(unit) => self.unit = unit,
+            A010Arg::Fps(fps) => self.fps = fps,
+        }
+    }
+}
+
 impl Decoder for A010Codec {
-    type Item = String;
+    type Item = A010Rsp;
     type Error = std::io::Error;
 
     fn decode(
@@ -205,59 +571,108 @@ impl Decoder for A010Codec {
         while src.remaining() > 0 {
             let byte = src.get_u8();
             if let Some(cmd) = self.handle_byte(byte) {
-                return Ok(Some(cmd));
+                if cmd == "OK" {
+                    return Ok(Some(A010Rsp::OK));
+                } else if let Some(arg) = BINN::decode(cmd.as_bytes()) {
+                    return Ok(Some(A010Rsp::Binn(arg)));
+                } else if let Some(arg) = DISP::decode(cmd.as_bytes()) {
+                    return Ok(Some(A010Rsp::Disp(arg)));
+                } else if let Some(arg) = BAUD::decode(cmd.as_bytes()) {
+                    return Ok(Some(A010Rsp::Baud(arg)));
+                } else if let Some(arg) = UNIT::decode(cmd.as_bytes()) {
+                    return Ok(Some(A010Rsp::Unit(arg)));
+                } else if let Some(arg) = FPS::decode(cmd.as_bytes()) {
+                    return Ok(Some(A010Rsp::Fps(arg)));
+                } else {
+                    return Ok(None);
+                }
             }
         }
         Ok(None)
     }
 }
 
-impl Encoder<String> for A010Codec {
+impl Encoder<A010Cmd> for A010Codec {
     type Error = std::io::Error;
 
     fn encode(
         &mut self,
-        item: String,
+        item: A010Cmd,
         dst: &mut tokio_util::bytes::BytesMut,
     ) -> Result<(), Self::Error> {
-        println!("CMD: {}", &item);
-
-        dst.extend_from_slice(item.as_bytes());
-        dst.put_u8('\r' as u8);
+        match item {
+            A010Cmd::AT => {
+                dst.extend_from_slice(b"AT\r");
+                return Ok(());
+            }
+            A010Cmd::Get(arg) => arg.encode_get(dst),
+            A010Cmd::Set(arg) => arg.encode_set(dst),
+            A010Cmd::SetGet(arg) => {
+                arg.encode_set(dst);
+                arg.encode_get(dst);
+            }
+        }
         Ok(())
     }
 }
 
-async fn handle_at_commands(a010: A010CodecFramed) {
-    let mut a010 = a010;
+type AtCmdSender = tokio::sync::mpsc::Sender<A010Cmd>;
+type AtCmdReceiver = tokio::sync::mpsc::Receiver<A010Cmd>;
+type AtRspSender = tokio::sync::mpsc::Sender<A010Rsp>;
+type AtRspReceiver = tokio::sync::mpsc::Receiver<A010Rsp>;
 
-    let stdin = tokio::io::stdin();
-    let mut reader = FramedRead::new(stdin, LinesCodec::new());
+async fn handle_at_commands(
+    a010: A010CodecFramed,
+    commands: AtCmdReceiver,
+    responses: AtRspSender,
+) {
+    let mut a010 = a010;
+    let mut commands = commands;
 
     loop {
         select! {
-            command = reader.next() => {
-                let command = command.transpose().unwrap();
+            command = commands.recv() => {
                 if let Some(cmd) = command {
                     if let Err(err) = a010.send(cmd).await {
                         eprintln!("Error sending command: {}", err);
                         return;
                     }
                 } else {
-                    println!("stdin stream terminated");
+                    println!("cmd stream terminated");
                     return;
                 }
             }
             response = a010.next() => {
                 let response = response.transpose().unwrap();
                 if let Some(rsp) = response {
-                    println!("RSP: {}", rsp);
+                    if let Err(_) = responses.send(rsp).await {
+                        println!("response stream error");
+                    return;
+                    }
                 } else {
                     println!("response stream terminated");
                     return;
                 }
             }
         };
+    }
+}
+
+type ConfigSender = tokio::sync::watch::Sender<A010Config>;
+type ConfigReceiver = tokio::sync::watch::Receiver<A010Config>;
+
+async fn handle_at_config(responses: AtRspReceiver, config: ConfigSender) {
+    let mut responses = responses;
+    let mut cfg = A010Config::default();
+
+    while let Some(response) = responses.recv().await {
+        if let Some(arg) = response.as_arg() {
+            cfg.apply(arg);
+            if let Err(_) = config.send(cfg) {
+                println!("error sending config");
+                return;
+            }
+        }
     }
 }
 
@@ -295,9 +710,13 @@ async fn main() {
 
     let (codec, frame_receiver) = A010Codec::new();
     let a010: A010CodecFramed = Framed::new(serial, codec);
-    spawn(handle_at_commands(a010));
 
-    main_window(frame_receiver);
+    let (cmd_sender, cmd_receiver) = tokio::sync::mpsc::channel(32);
+    let (rsp_sender, rsp_receiver) = tokio::sync::mpsc::channel(32);
+    let (cfg_sender, cfg_receiver) = tokio::sync::watch::channel(A010Config::default());
+    spawn(handle_at_commands(a010, cmd_receiver, rsp_sender));
+    spawn(handle_at_config(rsp_receiver, cfg_sender));
+    main_window(frame_receiver, cmd_sender, cfg_receiver);
 }
 
 fn setup_frame_indices(indices: &mut Vec<u16>, side: usize) {
@@ -412,8 +831,25 @@ fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
 const CAMERA_APERTURE: f32 = 60.0;
 const INITIAL_CAMERA_DISTANCE: f32 = MAX_Z * 2.0;
 
-fn main_window(frame_receiver: FrameReceiver) {
+fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: ConfigReceiver) {
     let mut frame_receiver = frame_receiver;
+
+    commands
+        .try_send(A010Cmd::Get(A010Arg::Binn(BINN::default())))
+        .unwrap();
+    commands
+        .try_send(A010Cmd::Get(A010Arg::Baud(BAUD::default())))
+        .unwrap();
+    commands
+        .try_send(A010Cmd::Get(A010Arg::Disp(DISP::default())))
+        .unwrap();
+    commands
+        .try_send(A010Cmd::Get(A010Arg::Unit(UNIT::default())))
+        .unwrap();
+    commands
+        .try_send(A010Cmd::Get(A010Arg::Fps(FPS::default())))
+        .unwrap();
+
     let window = Window::new(WindowSettings {
         title: "Instanced Shapes!".to_string(),
         max_size: Some((2000, 2000)),
@@ -448,8 +884,11 @@ fn main_window(frame_receiver: FrameReceiver) {
         ..Default::default()
     };
 
-    // Initial properties of the example, 2 cubes per side and non instanced.
-    let mut side_count = 2;
+    let allowed_binn = BINN::allowed_values();
+    let allowed_disp = DISP::allowed_values();
+    let allowed_baud = BAUD::allowed_values();
+    let allowed_unit = UNIT::allowed_values();
+    let allowed_fps = FPS::allowed_values();
 
     let mut gui = three_d::GUI::new(&context);
     window.render_loop(move |mut frame_input| {
@@ -464,16 +903,99 @@ fn main_window(frame_receiver: FrameReceiver) {
                 use three_d::egui::*;
                 SidePanel::left("side_panel").show(gui_context, |ui| {
                     use three_d::egui::*;
-                    ui.heading("Debug Panel");
-                    ui.add(
-                        Slider::new(&mut side_count, 1..=25).text("Number of cubes at each side."),
-                    );
-                    ui.add(Label::new(
-                        "Increase the cube count until the cubes don't rotate \
-                                       smoothly anymore, then toggle on instancing. The rotations \
-                                       should become smooth again.",
-                    ));
+
+                    let current_config = *config.borrow();
+                    let mut next_config = current_config;
+
+                    ui.heading("A010 configuration");
+
+                    ComboBox::from_label("BINN")
+                        .selected_text(current_config.binn.value_name())
+                        .show_ui(ui, |ui| {
+                            for v in allowed_binn.iter() {
+                                ui.selectable_value(
+                                    &mut next_config.binn,
+                                    current_config.binn,
+                                    v.value_name(),
+                                );
+                            }
+                        });
+
+                    ComboBox::from_label("DISP")
+                        .selected_text(current_config.disp.value_name())
+                        .show_ui(ui, |ui| {
+                            for v in allowed_disp.iter() {
+                                ui.selectable_value(
+                                    &mut next_config.disp,
+                                    current_config.disp,
+                                    v.value_name(),
+                                );
+                            }
+                        });
+
+                    ComboBox::from_label("BAUD")
+                        .selected_text(current_config.baud.value_name())
+                        .show_ui(ui, |ui| {
+                            for v in allowed_baud.iter() {
+                                ui.selectable_value(
+                                    &mut next_config.baud,
+                                    current_config.baud,
+                                    v.value_name(),
+                                );
+                            }
+                        });
+
+                    ComboBox::from_label("UNIT")
+                        .selected_text(current_config.unit.value_name())
+                        .show_ui(ui, |ui| {
+                            for v in allowed_unit.iter() {
+                                ui.selectable_value(
+                                    &mut next_config.unit,
+                                    current_config.unit,
+                                    v.value_name(),
+                                );
+                            }
+                        });
+
+                    ComboBox::from_label("FPS")
+                        .selected_text(current_config.fps.value_name())
+                        .show_ui(ui, |ui| {
+                            for v in allowed_fps.iter() {
+                                ui.selectable_value(
+                                    &mut next_config.fps,
+                                    current_config.fps,
+                                    v.value_name(),
+                                );
+                            }
+                        });
+
+                    if next_config.binn != current_config.binn {
+                        commands
+                            .try_send(A010Cmd::SetGet(A010Arg::Binn(next_config.binn)))
+                            .unwrap();
+                    }
+                    if next_config.disp != current_config.disp {
+                        commands
+                            .try_send(A010Cmd::SetGet(A010Arg::Disp(next_config.disp)))
+                            .unwrap();
+                    }
+                    if next_config.baud != current_config.baud {
+                        commands
+                            .try_send(A010Cmd::SetGet(A010Arg::Baud(next_config.baud)))
+                            .unwrap();
+                    }
+                    if next_config.unit != current_config.unit {
+                        commands
+                            .try_send(A010Cmd::SetGet(A010Arg::Unit(next_config.unit)))
+                            .unwrap();
+                    }
+                    if next_config.fps != current_config.fps {
+                        commands
+                            .try_send(A010Cmd::SetGet(A010Arg::Fps(next_config.fps)))
+                            .unwrap();
+                    }
                 });
+
                 panel_width = gui_context.used_rect().width();
             },
         );
