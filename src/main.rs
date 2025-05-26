@@ -854,13 +854,33 @@ fn setup_frame_colors(colors: &mut Vec<Srgba>, side: usize) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameProjection {
+    Orthographic,
+    Perspective,
+    Spherical,
+}
+
+impl FrameProjection {
+    pub fn name(&self) -> &'static str {
+        match self {
+            FrameProjection::Orthographic => "Orthographic",
+            FrameProjection::Perspective => "Perspective",
+            FrameProjection::Spherical => "Spherical",
+        }
+    }
+}
+
 const FRAME_APERTURE_W: f32 = 60.0;
 const FRAME_APERTURE_H: f32 = 60.0;
 const FRAME_DISTANCE_SCALE: f32 = 1.0;
 
 const MAX_Z: f32 = 255.0;
 
-fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
+const FRAME_SIZE_W: f32 = 255.0;
+const FRAME_SIZE_H: f32 = 255.0;
+
+fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh, projection: FrameProjection) -> bool {
     let positions = match &mut mesh.positions {
         Positions::F32(points) => points,
         _ => return false,
@@ -885,9 +905,13 @@ fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
         setup_frame_colors(colors, side);
     }
 
-    let dw = FRAME_APERTURE_W / side as f32;
-    let dh = FRAME_APERTURE_H / side as f32;
+    let dw = FRAME_SIZE_W / side as f32;
+    let dh = FRAME_SIZE_H / side as f32;
+    let x0 = -FRAME_SIZE_W / 2.0;
+    let y0 = -FRAME_SIZE_H / 2.0;
 
+    let adw = FRAME_APERTURE_W / side as f32;
+    let adh = FRAME_APERTURE_H / side as f32;
     let ax0 = -FRAME_APERTURE_W / 2.0;
     let ay0 = -FRAME_APERTURE_H / 2.0;
 
@@ -907,11 +931,33 @@ fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
             colors.push(color);
 
             let distance = cell as f32 * FRAME_DISTANCE_SCALE;
-            let z = MAX_Z - distance;
-            let ax = ax0 + (ix as f32 * dw);
-            let ay = ay0 + (iy as f32 * dh);
-            let x = ax.to_radians().sin() * distance * FRAME_DISTANCE_SCALE;
-            let y = ay.to_radians().sin() * distance * FRAME_DISTANCE_SCALE;
+
+            let (x, y, z) = match projection {
+                FrameProjection::Orthographic => (
+                    x0 + (ix as f32 * dw),
+                    y0 + (iy as f32 * dh),
+                    MAX_Z - distance,
+                ),
+                FrameProjection::Perspective => {
+                    let ax = ax0 + (ix as f32 * adw);
+                    let ay = ay0 + (iy as f32 * adh);
+                    let x = ax.to_radians().sin() * distance * FRAME_DISTANCE_SCALE;
+                    let y = ay.to_radians().sin() * distance * FRAME_DISTANCE_SCALE;
+                    let z = MAX_Z - distance;
+                    (x, y, z)
+                }
+                FrameProjection::Spherical => {
+                    let ax = ax0 + (ix as f32 * adw);
+                    let ay = ay0 + (iy as f32 * adh);
+                    let x = ax.to_radians().sin() * distance * FRAME_DISTANCE_SCALE;
+                    let y = ay.to_radians().sin() * distance * FRAME_DISTANCE_SCALE;
+                    let xy = (x * x + y * y).sqrt();
+                    let zz = (distance * distance - xy * xy).sqrt();
+                    let z = MAX_Z - zz;
+                    (x, y, z)
+                }
+            };
+
             positions.push(vec3(x, y, z));
         }
     }
@@ -964,6 +1010,8 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
     let allowed_baud = BAUD::allowed_values();
     let allowed_unit = UNIT::allowed_values();
     let allowed_fps = FPS::allowed_values();
+
+    let mut projection = FrameProjection::Orthographic;
 
     let mut gui = three_d::GUI::new(&context);
     window.render_loop(move |mut frame_input| {
@@ -1021,6 +1069,29 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
                             for v in allowed_fps.iter() {
                                 ui.selectable_value(&mut next_config.fps, *v, v.value_name());
                             }
+                        });
+
+                    ui.separator();
+
+                    ui.heading("Projection");
+                    ComboBox::from_label("Proj")
+                        .selected_text(projection.name())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut projection,
+                                FrameProjection::Orthographic,
+                                FrameProjection::Orthographic.name(),
+                            );
+                            ui.selectable_value(
+                                &mut projection,
+                                FrameProjection::Perspective,
+                                FrameProjection::Perspective.name(),
+                            );
+                            ui.selectable_value(
+                                &mut projection,
+                                FrameProjection::Spherical,
+                                FrameProjection::Spherical.name(),
+                            );
                         });
                 });
 
@@ -1085,7 +1156,7 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
         }
 
         // Build frame
-        let render_frame = setup_frame(&frame, &mut frame_mesh);
+        let render_frame = setup_frame(&frame, &mut frame_mesh, projection);
 
         // Render everything
         let screen = frame_input.screen();
