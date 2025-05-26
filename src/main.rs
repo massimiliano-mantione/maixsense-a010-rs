@@ -512,6 +512,7 @@ pub enum A010Cmd {
     GetUnit,
     GetFps,
     Set(A010Arg),
+    SAVE,
 }
 
 impl A010Cmd {
@@ -633,6 +634,9 @@ impl Encoder<A010Cmd> for A010Codec {
             A010Cmd::GetUnit => A010Arg::encode_get_unit(dst),
             A010Cmd::GetFps => A010Arg::encode_get_fps(dst),
             A010Cmd::Set(arg) => arg.encode_set(dst),
+            A010Cmd::SAVE => {
+                dst.extend_from_slice(b"SAVE\r\n");
+            }
         }
         Ok(())
     }
@@ -1093,6 +1097,14 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
                                 FrameProjection::Spherical.name(),
                             );
                         });
+
+                    ui.separator();
+
+                    ui.heading("Save Configuration");
+                    if ui.button("SAVE").clicked() {
+                        println!("Saving configuration");
+                        commands.try_send(A010Cmd::SAVE).unwrap();
+                    }
                 });
 
                 panel_width = gui_context.used_rect().width();
