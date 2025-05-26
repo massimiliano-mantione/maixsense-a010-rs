@@ -815,6 +815,19 @@ fn setup_frame_indices(indices: &mut Vec<u16>, side: usize) {
     }
 }
 
+const FRAME_BASE_COLOR_EVEN: Srgba = Srgba {
+    r: 64,
+    g: 64,
+    b: 64,
+    a: 255,
+};
+const FRAME_BASE_COLOR_ODD: Srgba = Srgba {
+    r: 16,
+    g: 16,
+    b: 16,
+    a: 255,
+};
+
 const FRAME_COLOR_EVEN: Srgba = Srgba {
     r: 192,
     g: 192,
@@ -879,10 +892,21 @@ fn setup_frame(frame: &A010Frame, mesh: &mut CpuMesh) -> bool {
     let ay0 = -FRAME_APERTURE_H / 2.0;
 
     positions.clear();
+    colors.clear();
     for ix in 0..side {
         for iy in 0..side {
             let i = ix + iy * side;
-            let distance = frame.data[i] as f32 * FRAME_DISTANCE_SCALE;
+            let cell = frame.data[i];
+
+            let color = match ((ix + iy) % 2 == 0, cell == 255) {
+                (true, true) => FRAME_BASE_COLOR_EVEN,
+                (false, true) => FRAME_BASE_COLOR_ODD,
+                (true, false) => FRAME_COLOR_EVEN,
+                (false, false) => FRAME_COLOR_ODD,
+            };
+            colors.push(color);
+
+            let distance = cell as f32 * FRAME_DISTANCE_SCALE;
             let z = MAX_Z - distance;
             let ax = ax0 + (ix as f32 * dw);
             let ay = ay0 + (iy as f32 * dh);
