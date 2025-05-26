@@ -653,8 +653,6 @@ async fn handle_cmd(a010: &mut A010CodecFramed, cfg: &mut A010Config, cmd: A010C
     }
 
     loop {
-        println!("Waiting for response to command {:?}", cmd);
-
         let rsp = match a010.next().await.transpose() {
             Ok(rsp) => match rsp {
                 Some(rsp) => rsp,
@@ -722,9 +720,6 @@ async fn handle_a010_connection(
         }
 
         let command = select! {
-            command = commands.recv() => {
-                command
-            }
             response = a010.next() => {
                 let response = response.transpose().unwrap();
                 if let Some(rsp) = response {
@@ -736,6 +731,9 @@ async fn handle_a010_connection(
                     return;
                 }
                 None
+            }
+            command = commands.recv() => {
+                command
             }
         };
 
