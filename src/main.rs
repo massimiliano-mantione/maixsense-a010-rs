@@ -197,7 +197,7 @@ impl A010Codec {
 fn write_at_get_arg(name: &str, dst: &mut tokio_util::bytes::BytesMut) {
     dst.extend_from_slice(b"AT+");
     dst.extend_from_slice(name.as_bytes());
-    dst.extend_from_slice(b"?\r");
+    dst.extend_from_slice(b"?\r\n");
 }
 
 fn write_at_set_arg(name: &str, value: u8, dst: &mut tokio_util::bytes::BytesMut) {
@@ -214,13 +214,14 @@ fn write_at_set_arg(name: &str, value: u8, dst: &mut tokio_util::bytes::BytesMut
         value %= 10;
     }
     dst.put_u8(value + b'0');
-    dst.put_u8('\r' as u8);
+    dst.extend_from_slice(b"\r\n");
 }
 
 fn decode_at_arg(name: &str, from: &[u8]) -> Option<u8> {
     from.strip_prefix(b"+")
         .and_then(|buf| buf.strip_prefix(name.as_bytes()))
         .and_then(|buf| buf.strip_prefix(b"="))
+        .map(|buf| buf.trim_ascii_start())
         .and_then(|buf| {
             if buf.len() < 1 || buf[0] < b'0' || buf[0] > b'9' {
                 return None;
@@ -285,7 +286,7 @@ pub trait AtArg: Sized {
         Self::new_unchecked(Self::DEFAULT)
     }
 
-    fn encode_get(&self, dst: &mut tokio_util::bytes::BytesMut) {
+    fn encode_get(dst: &mut tokio_util::bytes::BytesMut) {
         write_at_get_arg(Self::NAME, dst);
     }
 
@@ -333,10 +334,10 @@ fn test_at_arg() {
 
     let arg = TestArg::new(4).unwrap();
     arg.encode_set(&mut buf);
-    assert_eq!(buf.as_ref(), b"AT+TEST=4\r");
+    assert_eq!(buf.as_ref(), b"AT+TEST=4\r\n");
     buf.clear();
-    arg.encode_get(&mut buf);
-    assert_eq!(buf.as_ref(), b"AT+TEST?\r");
+    TestArg::encode_get(&mut buf);
+    assert_eq!(buf.as_ref(), b"AT+TEST?\r\n");
 
     let decoded = TestArg::decode(b"+TEST=4").unwrap();
     assert_eq!(decoded.value(), 4);
@@ -475,14 +476,20 @@ pub enum A010Arg {
 }
 
 impl A010Arg {
-    fn encode_get(&self, dst: &mut tokio_util::bytes::BytesMut) {
-        match self {
-            A010Arg::Binn(binn) => binn.encode_get(dst),
-            A010Arg::Disp(disp) => disp.encode_get(dst),
-            A010Arg::Baud(baud) => baud.encode_get(dst),
-            A010Arg::Unit(unit) => unit.encode_get(dst),
-            A010Arg::Fps(fps) => fps.encode_get(dst),
-        }
+    fn encode_get_binn(dst: &mut tokio_util::bytes::BytesMut) {
+        BINN::encode_get(dst)
+    }
+    fn encode_get_disp(dst: &mut tokio_util::bytes::BytesMut) {
+        DISP::encode_get(dst)
+    }
+    fn encode_get_baud(dst: &mut tokio_util::bytes::BytesMut) {
+        BAUD::encode_get(dst)
+    }
+    fn encode_get_unit(dst: &mut tokio_util::bytes::BytesMut) {
+        UNIT::encode_get(dst)
+    }
+    fn encode_get_fps(dst: &mut tokio_util::bytes::BytesMut) {
+        FPS::encode_get(dst)
     }
 
     fn encode_set(&self, dst: &mut tokio_util::bytes::BytesMut) {
@@ -497,6 +504,26 @@ impl A010Arg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum A010Cmd {
+    AT,
+    GetBinn,
+    GetDisp,
+    GetBaud,
+    GetUnit,
+    GetFps,
+    Set(A010Arg),
+}
+
+impl A010Cmd {
+    pub fn as_arg(&self) -> Option<A010Arg> {
+        match self {
+            A010Cmd::Set(arg) => Some(*arg),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum A010Rsp {
     OK,
     Binn(BINN),
@@ -504,14 +531,6 @@ pub enum A010Rsp {
     Baud(BAUD),
     Unit(UNIT),
     Fps(FPS),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum A010Cmd {
-    AT,
-    Get(A010Arg),
-    Set(A010Arg),
-    SetGet(A010Arg),
 }
 
 impl A010Rsp {
@@ -571,6 +590,8 @@ impl Decoder for A010Codec {
         while src.remaining() > 0 {
             let byte = src.get_u8();
             if let Some(cmd) = self.handle_byte(byte) {
+                println!("Decoding response string: {}", cmd);
+
                 if cmd == "OK" {
                     return Ok(Some(A010Rsp::OK));
                 } else if let Some(arg) = BINN::decode(cmd.as_bytes()) {
@@ -600,17 +621,18 @@ impl Encoder<A010Cmd> for A010Codec {
         item: A010Cmd,
         dst: &mut tokio_util::bytes::BytesMut,
     ) -> Result<(), Self::Error> {
+        println!("Encoding command: {:?}", item);
+
         match item {
             A010Cmd::AT => {
-                dst.extend_from_slice(b"AT\r");
-                return Ok(());
+                dst.extend_from_slice(b"AT\r\n");
             }
-            A010Cmd::Get(arg) => arg.encode_get(dst),
+            A010Cmd::GetBinn => A010Arg::encode_get_binn(dst),
+            A010Cmd::GetDisp => A010Arg::encode_get_disp(dst),
+            A010Cmd::GetBaud => A010Arg::encode_get_baud(dst),
+            A010Cmd::GetUnit => A010Arg::encode_get_unit(dst),
+            A010Cmd::GetFps => A010Arg::encode_get_fps(dst),
             A010Cmd::Set(arg) => arg.encode_set(dst),
-            A010Cmd::SetGet(arg) => {
-                arg.encode_set(dst);
-                arg.encode_get(dst);
-            }
         }
         Ok(())
     }
@@ -618,58 +640,107 @@ impl Encoder<A010Cmd> for A010Codec {
 
 type AtCmdSender = tokio::sync::mpsc::Sender<A010Cmd>;
 type AtCmdReceiver = tokio::sync::mpsc::Receiver<A010Cmd>;
-type AtRspSender = tokio::sync::mpsc::Sender<A010Rsp>;
-type AtRspReceiver = tokio::sync::mpsc::Receiver<A010Rsp>;
 
-async fn handle_at_commands(
+type ConfigSender = tokio::sync::watch::Sender<A010Config>;
+type ConfigReceiver = tokio::sync::watch::Receiver<A010Config>;
+
+async fn handle_cmd(a010: &mut A010CodecFramed, cfg: &mut A010Config, cmd: A010Cmd) -> bool {
+    let arg = cmd.as_arg();
+
+    if let Err(err) = a010.send(cmd).await {
+        println!("Error sending command {:?}: {}", cmd, err);
+        return true;
+    }
+
+    loop {
+        println!("Waiting for response to command {:?}", cmd);
+
+        let rsp = match a010.next().await.transpose() {
+            Ok(rsp) => match rsp {
+                Some(rsp) => rsp,
+                None => {
+                    println!("response stream terminated");
+                    return true;
+                }
+            },
+            Err(err) => {
+                println!("Error receiving response to command {:?}: {}", cmd, err);
+                return true;
+            }
+        };
+
+        println!("Received response: {:?}", rsp);
+        let arg = arg.or(rsp.as_arg());
+        if let Some(arg) = arg {
+            cfg.apply(arg);
+        }
+
+        if rsp == A010Rsp::OK {
+            println!("Command {:?} executed successfully.", cmd);
+            return false;
+        }
+    }
+}
+
+async fn handle_a010_connection(
     a010: A010CodecFramed,
     commands: AtCmdReceiver,
-    responses: AtRspSender,
+    config: ConfigSender,
 ) {
     let mut a010 = a010;
     let mut commands = commands;
 
+    let mut cfg = A010Config::default();
+
+    println!("Requesting initial configuration...");
+    println!("GET BINN");
+    if handle_cmd(&mut a010, &mut cfg, A010Cmd::GetBinn).await {
+        return;
+    }
+    println!("GET DISP");
+    if handle_cmd(&mut a010, &mut cfg, A010Cmd::GetDisp).await {
+        return;
+    }
+    println!("GET BAUD");
+    if handle_cmd(&mut a010, &mut cfg, A010Cmd::GetBaud).await {
+        return;
+    }
+    println!("GET UNIT");
+    if handle_cmd(&mut a010, &mut cfg, A010Cmd::GetUnit).await {
+        return;
+    }
+    println!("GET FPS");
+    if handle_cmd(&mut a010, &mut cfg, A010Cmd::GetFps).await {
+        return;
+    }
+    println!("Initial configuration requested.");
+
     loop {
-        select! {
+        if let Err(_) = config.send(cfg) {
+            println!("error sending config");
+            return;
+        }
+
+        let command = select! {
             command = commands.recv() => {
-                if let Some(cmd) = command {
-                    if let Err(err) = a010.send(cmd).await {
-                        eprintln!("Error sending command: {}", err);
-                        return;
-                    }
-                } else {
-                    println!("cmd stream terminated");
-                    return;
-                }
+                command
             }
             response = a010.next() => {
                 let response = response.transpose().unwrap();
                 if let Some(rsp) = response {
-                    if let Err(_) = responses.send(rsp).await {
-                        println!("response stream error");
-                    return;
+                    if let Some(arg) = rsp.as_arg() {
+                        cfg.apply(arg);
                     }
                 } else {
                     println!("response stream terminated");
                     return;
                 }
+                None
             }
         };
-    }
-}
 
-type ConfigSender = tokio::sync::watch::Sender<A010Config>;
-type ConfigReceiver = tokio::sync::watch::Receiver<A010Config>;
-
-async fn handle_at_config(responses: AtRspReceiver, config: ConfigSender) {
-    let mut responses = responses;
-    let mut cfg = A010Config::default();
-
-    while let Some(response) = responses.recv().await {
-        if let Some(arg) = response.as_arg() {
-            cfg.apply(arg);
-            if let Err(_) = config.send(cfg) {
-                println!("error sending config");
+        if let Some(cmd) = command {
+            if handle_cmd(&mut a010, &mut cfg, cmd).await {
                 return;
             }
         }
@@ -712,10 +783,8 @@ async fn main() {
     let a010: A010CodecFramed = Framed::new(serial, codec);
 
     let (cmd_sender, cmd_receiver) = tokio::sync::mpsc::channel(32);
-    let (rsp_sender, rsp_receiver) = tokio::sync::mpsc::channel(32);
     let (cfg_sender, cfg_receiver) = tokio::sync::watch::channel(A010Config::default());
-    spawn(handle_at_commands(a010, cmd_receiver, rsp_sender));
-    spawn(handle_at_config(rsp_receiver, cfg_sender));
+    spawn(handle_a010_connection(a010, cmd_receiver, cfg_sender));
     main_window(frame_receiver, cmd_sender, cfg_receiver);
 }
 
@@ -834,22 +903,6 @@ const INITIAL_CAMERA_DISTANCE: f32 = MAX_Z * 2.0;
 fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: ConfigReceiver) {
     let mut frame_receiver = frame_receiver;
 
-    commands
-        .try_send(A010Cmd::Get(A010Arg::Binn(BINN::default())))
-        .unwrap();
-    commands
-        .try_send(A010Cmd::Get(A010Arg::Baud(BAUD::default())))
-        .unwrap();
-    commands
-        .try_send(A010Cmd::Get(A010Arg::Disp(DISP::default())))
-        .unwrap();
-    commands
-        .try_send(A010Cmd::Get(A010Arg::Unit(UNIT::default())))
-        .unwrap();
-    commands
-        .try_send(A010Cmd::Get(A010Arg::Fps(FPS::default())))
-        .unwrap();
-
     let window = Window::new(WindowSettings {
         title: "Instanced Shapes!".to_string(),
         max_size: Some((2000, 2000)),
@@ -892,8 +945,10 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
 
     let mut gui = three_d::GUI::new(&context);
     window.render_loop(move |mut frame_input| {
-        // Gui panel to control the number of cubes and whether or not instancing is turned on.
+        let current_config = *config.borrow();
+        let mut next_config = current_config;
         let mut panel_width = 0.0;
+
         gui.update(
             &mut frame_input.events,
             frame_input.accumulated_time,
@@ -904,20 +959,13 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
                 SidePanel::left("side_panel").show(gui_context, |ui| {
                     use three_d::egui::*;
 
-                    let current_config = *config.borrow();
-                    let mut next_config = current_config;
-
                     ui.heading("A010 configuration");
 
                     ComboBox::from_label("BINN")
                         .selected_text(current_config.binn.value_name())
                         .show_ui(ui, |ui| {
                             for v in allowed_binn.iter() {
-                                ui.selectable_value(
-                                    &mut next_config.binn,
-                                    current_config.binn,
-                                    v.value_name(),
-                                );
+                                ui.selectable_value(&mut next_config.binn, *v, v.value_name());
                             }
                         });
 
@@ -925,11 +973,7 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
                         .selected_text(current_config.disp.value_name())
                         .show_ui(ui, |ui| {
                             for v in allowed_disp.iter() {
-                                ui.selectable_value(
-                                    &mut next_config.disp,
-                                    current_config.disp,
-                                    v.value_name(),
-                                );
+                                ui.selectable_value(&mut next_config.disp, *v, v.value_name());
                             }
                         });
 
@@ -937,11 +981,7 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
                         .selected_text(current_config.baud.value_name())
                         .show_ui(ui, |ui| {
                             for v in allowed_baud.iter() {
-                                ui.selectable_value(
-                                    &mut next_config.baud,
-                                    current_config.baud,
-                                    v.value_name(),
-                                );
+                                ui.selectable_value(&mut next_config.baud, *v, v.value_name());
                             }
                         });
 
@@ -949,11 +989,7 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
                         .selected_text(current_config.unit.value_name())
                         .show_ui(ui, |ui| {
                             for v in allowed_unit.iter() {
-                                ui.selectable_value(
-                                    &mut next_config.unit,
-                                    current_config.unit,
-                                    v.value_name(),
-                                );
+                                ui.selectable_value(&mut next_config.unit, *v, v.value_name());
                             }
                         });
 
@@ -961,39 +997,9 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
                         .selected_text(current_config.fps.value_name())
                         .show_ui(ui, |ui| {
                             for v in allowed_fps.iter() {
-                                ui.selectable_value(
-                                    &mut next_config.fps,
-                                    current_config.fps,
-                                    v.value_name(),
-                                );
+                                ui.selectable_value(&mut next_config.fps, *v, v.value_name());
                             }
                         });
-
-                    if next_config.binn != current_config.binn {
-                        commands
-                            .try_send(A010Cmd::SetGet(A010Arg::Binn(next_config.binn)))
-                            .unwrap();
-                    }
-                    if next_config.disp != current_config.disp {
-                        commands
-                            .try_send(A010Cmd::SetGet(A010Arg::Disp(next_config.disp)))
-                            .unwrap();
-                    }
-                    if next_config.baud != current_config.baud {
-                        commands
-                            .try_send(A010Cmd::SetGet(A010Arg::Baud(next_config.baud)))
-                            .unwrap();
-                    }
-                    if next_config.unit != current_config.unit {
-                        commands
-                            .try_send(A010Cmd::SetGet(A010Arg::Unit(next_config.unit)))
-                            .unwrap();
-                    }
-                    if next_config.fps != current_config.fps {
-                        commands
-                            .try_send(A010Cmd::SetGet(A010Arg::Fps(next_config.fps)))
-                            .unwrap();
-                    }
                 });
 
                 panel_width = gui_context.used_rect().width();
@@ -1020,8 +1026,40 @@ fn main_window(frame_receiver: FrameReceiver, commands: AtCmdSender, config: Con
                 }
             }
             Err(e) => {
-                eprintln!("frame receiver error: {}", e);
+                println!("frame receiver error: {}", e);
             }
+        }
+
+        // Handle config changes
+        if next_config.binn != current_config.binn {
+            println!("Setting BINN to {}", next_config.binn.value_name());
+            commands
+                .try_send(A010Cmd::Set(A010Arg::Binn(next_config.binn)))
+                .unwrap();
+        }
+        if next_config.disp != current_config.disp {
+            println!("Setting DISP to {}", next_config.disp.value_name());
+            commands
+                .try_send(A010Cmd::Set(A010Arg::Disp(next_config.disp)))
+                .unwrap();
+        }
+        if next_config.baud != current_config.baud {
+            println!("Setting BAUD to {}", next_config.baud.value_name());
+            commands
+                .try_send(A010Cmd::Set(A010Arg::Baud(next_config.baud)))
+                .unwrap();
+        }
+        if next_config.unit != current_config.unit {
+            println!("Setting UNIT to {}", next_config.unit.value_name());
+            commands
+                .try_send(A010Cmd::Set(A010Arg::Unit(next_config.unit)))
+                .unwrap();
+        }
+        if next_config.fps != current_config.fps {
+            println!("Setting FPS to {}", next_config.fps.value_name());
+            commands
+                .try_send(A010Cmd::Set(A010Arg::Fps(next_config.fps)))
+                .unwrap();
         }
 
         // Build frame
